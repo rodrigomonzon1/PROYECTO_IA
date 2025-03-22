@@ -2,9 +2,14 @@ import streamlit as st
 import pandas as pd
 from google import genai
 import json
+from dotenv import load_dotenv
+import os
+
+# Cargar variables de entorno
+load_dotenv()
 
 # Configure Google Gemini AI
-client = genai.Client(api_key='AIzaSyAcP9xNP6zwTIyPLNh2JGWPrsw9CdIo6mw')
+client = genai.Client(api_key=os.getenv('GOOGLE_API_KEY'))
 model = 'gemini-2.0-flash'
 
 # Initialize session state variables if they don't exist
