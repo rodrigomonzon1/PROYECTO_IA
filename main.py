@@ -1,16 +1,13 @@
 import streamlit as st
 import pandas as pd
-from google import genai
 import json
 from dotenv import load_dotenv
 import os
+import re
+from typing import List, Dict, Any
 
 # Cargar variables de entorno
 load_dotenv()
-
-# Configure Google Gemini AI
-client = genai.Client(api_key=os.getenv('GOOGLE_API_KEY'))
-model = 'gemini-2.0-flash'
 
 # Initialize session state variables if they don't exist
 if 'volunteers' not in st.session_state:
@@ -20,63 +17,95 @@ if 'organizations' not in st.session_state:
 if 'matches' not in st.session_state:
     st.session_state.matches = []
 
-# Function to generate AI-based matches
+def validate_email(email: str) -> bool:
+    """Valida el formato del correo electrónico."""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
+
+def is_duplicate_volunteer(email: str) -> bool:
+    """Verifica si ya existe un voluntario con el mismo correo."""
+    return any(v['email'] == email for v in st.session_state.volunteers)
+
+def is_duplicate_organization(name: str) -> bool:
+    """Verifica si ya existe una organización con el mismo nombre."""
+    return any(o['name'] == name for o in st.session_state.organizations)
+
+def calculate_match_score(volunteer: Dict, organization: Dict) -> int:
+    """Calcula la puntuación de coincidencia entre un voluntario y una organización."""
+    score = 0
+    
+    # Coincidencia de habilidades (40 puntos)
+    matching_skills = set(volunteer['skills']) & set(organization['needs'])
+    if matching_skills:
+        score += min(40, len(matching_skills) * 10)
+    
+    # Experiencia del voluntario (20 puntos)
+    if volunteer['experience'] > 0:
+        score += min(20, volunteer['experience'])
+    
+    # Disponibilidad (20 puntos)
+    if volunteer['availability'] in ["Tiempo completo", "Flexible"]:
+        score += 20
+    elif volunteer['availability'] in ["Tardes entre semana", "Tiempo parcial"]:
+        score += 15
+    elif volunteer['availability'] == "Solo fines de semana":
+        score += 10
+    
+    # Intereses y misión (20 puntos)
+    if volunteer['interests'] and organization['mission']:
+        # Buscar palabras clave comunes
+        volunteer_keywords = set(volunteer['interests'].lower().split())
+        mission_keywords = set(organization['mission'].lower().split())
+        common_keywords = volunteer_keywords & mission_keywords
+        if common_keywords:
+            score += min(20, len(common_keywords) * 5)
+    
+    return score
+
 def generate_matches():
+    """Genera coincidencias entre voluntarios y organizaciones usando un algoritmo basado en reglas."""
     if not st.session_state.volunteers or not st.session_state.organizations:
         st.warning("Por favor, añade al menos un voluntario y una organización para generar coincidencias.")
         return []
     
-    # Prepare data for AI matching
-    volunteers_data = json.dumps(st.session_state.volunteers)
-    organizations_data = json.dumps(st.session_state.organizations)
+    matches = []
+    for volunteer in st.session_state.volunteers:
+        for organization in st.session_state.organizations:
+            score = calculate_match_score(volunteer, organization)
+            if score > 0:  # Solo incluir coincidencias con puntuación mayor a 0
+                # Generar explicación basada en los criterios de coincidencia
+                explanation_parts = []
+                
+                # Coincidencia de habilidades
+                matching_skills = set(volunteer['skills']) & set(organization['needs'])
+                if matching_skills:
+                    explanation_parts.append(f"Coincidencia de habilidades: {', '.join(matching_skills)}")
+                
+                # Experiencia
+                if volunteer['experience'] > 0:
+                    explanation_parts.append(f"El voluntario tiene {volunteer['experience']} años de experiencia")
+                
+                # Disponibilidad
+                explanation_parts.append(f"Disponibilidad: {volunteer['availability']}")
+                
+                # Intereses y misión
+                if volunteer['interests'] and organization['mission']:
+                    volunteer_keywords = set(volunteer['interests'].lower().split())
+                    mission_keywords = set(organization['mission'].lower().split())
+                    common_keywords = volunteer_keywords & mission_keywords
+                    if common_keywords:
+                        explanation_parts.append(f"Intereses alineados con la misión: {', '.join(common_keywords)}")
+                
+                matches.append({
+                    "volunteer_name": volunteer['name'],
+                    "organization_name": organization['name'],
+                    "match_score": score,
+                    "explanation": " | ".join(explanation_parts)
+                })
     
-    prompt = f"""
-    Tengo los siguientes voluntarios con sus habilidades e intereses:
-    {volunteers_data}
-    
-    Y estas organizaciones con sus necesidades y misiones:
-    {organizations_data}
-    
-    Por favor, empareja cada voluntario con la organización más adecuada basándote en:
-    1. Alineación de las habilidades del voluntario con las necesidades de la organización
-    2. Compatibilidad de los intereses del voluntario con la misión de la organización
-    3. Potencial para una contribución significativa
-    
-    Para cada coincidencia, proporciona:
-    - Nombre del voluntario
-    - Nombre de la organización
-    - Puntuación de compatibilidad (0-100)
-    - Breve explicación de por qué es una buena coincidencia
-    
-    Devuelve los resultados como un array JSON de objetos con los campos: volunteer_name, organization_name, match_score, explanation.
-    Asegúrate de que la explicación esté en español.
-    """
-    
-    try:
-        response = client.models.generate_content(
-            model=model,
-            content=prompt
-        )
-        
-        # Extract JSON from response
-        response_text = response.text
-        # Find JSON content between ```json and ``` if present
-        if "```json" in response_text and "```" in response_text.split("```json")[1]:
-            json_str = response_text.split("```json")[1].split("```")[0].strip()
-        else:
-            # Otherwise try to find any JSON array in the response
-            import re
-            json_match = re.search(r'\[\s*\{.*\}\s*\]', response_text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                json_str = response_text
-        
-        matches = json.loads(json_str)
-        return matches
-    except Exception as e:
-        st.error(f"Error al generar coincidencias: {str(e)}")
-        return []
+    # Ordenar coincidencias por puntuación
+    matches.sort(key=lambda x: x['match_score'], reverse=True)
+    return matches
 
 # App title and description
 st.title("VolunNet")
@@ -111,17 +140,24 @@ with tab1:
         vol_experience = st.slider("Años de Experiencia", 0, 20, 1)
         
         submitted = st.form_submit_button("Registrarse como Voluntario")
-        if submitted and vol_name and vol_email:
-            new_volunteer = {
-                "name": vol_name,
-                "email": vol_email,
-                "skills": vol_skills,
-                "interests": vol_interests,
-                "availability": vol_availability,
-                "experience": vol_experience
-            }
-            st.session_state.volunteers.append(new_volunteer)
-            st.success(f"¡Gracias {vol_name}! Tu perfil de voluntario ha sido registrado.")
+        if submitted:
+            if not vol_name or not vol_email:
+                st.error("Por favor, completa todos los campos obligatorios.")
+            elif not validate_email(vol_email):
+                st.error("Por favor, ingresa un correo electrónico válido.")
+            elif is_duplicate_volunteer(vol_email):
+                st.error("Ya existe un voluntario registrado con este correo electrónico.")
+            else:
+                new_volunteer = {
+                    "name": vol_name,
+                    "email": vol_email,
+                    "skills": vol_skills,
+                    "interests": vol_interests,
+                    "availability": vol_availability,
+                    "experience": vol_experience
+                }
+                st.session_state.volunteers.append(new_volunteer)
+                st.success(f"¡Gracias {vol_name}! Tu perfil de voluntario ha sido registrado.")
     
     # Display registered volunteers
     if st.session_state.volunteers:
@@ -132,7 +168,8 @@ with tab1:
     # Option to clear volunteers (for demo purposes)
     if st.session_state.volunteers and st.button("Borrar Todos los Voluntarios"):
         st.session_state.volunteers = []
-        st.experimental_rerun()
+        st.session_state.clear()
+        st.rerun()
 
 # Organization Tab
 with tab2:
@@ -153,17 +190,22 @@ with tab2:
         org_website = st.text_input("Sitio Web (opcional)")
         
         submitted = st.form_submit_button("Registrar Organización")
-        if submitted and org_name and org_mission:
-            new_organization = {
-                "name": org_name,
-                "mission": org_mission,
-                "needs": org_needs,
-                "description": org_description,
-                "location": org_location,
-                "website": org_website
-            }
-            st.session_state.organizations.append(new_organization)
-            st.success(f"¡{org_name} ha sido registrada exitosamente!")
+        if submitted:
+            if not org_name or not org_mission:
+                st.error("Por favor, completa todos los campos obligatorios.")
+            elif is_duplicate_organization(org_name):
+                st.error("Ya existe una organización registrada con este nombre.")
+            else:
+                new_organization = {
+                    "name": org_name,
+                    "mission": org_mission,
+                    "needs": org_needs,
+                    "description": org_description,
+                    "location": org_location,
+                    "website": org_website
+                }
+                st.session_state.organizations.append(new_organization)
+                st.success(f"¡{org_name} ha sido registrada exitosamente!")
     
     # Display registered organizations
     if st.session_state.organizations:
@@ -174,7 +216,8 @@ with tab2:
     # Option to clear organizations (for demo purposes)
     if st.session_state.organizations and st.button("Borrar Todas las Organizaciones"):
         st.session_state.organizations = []
-        st.experimental_rerun()
+        st.session_state.clear()
+        st.rerun()
 
 # Matches Tab
 with tab3:
